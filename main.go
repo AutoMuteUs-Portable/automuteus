@@ -6,8 +6,8 @@ import (
 	"github.com/automuteus/utils/pkg/locale"
 	storage2 "github.com/automuteus/utils/pkg/storage"
 	"github.com/bwmarrin/discordgo"
+	"github.com/rs/zerolog"
 	"io"
-	"log"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -20,6 +20,7 @@ import (
 	"github.com/automuteus/automuteus/storage"
 
 	"github.com/automuteus/automuteus/discord"
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -38,11 +39,11 @@ type registeredCommand struct {
 func main() {
 	// seed the rand generator (used for making connection codes)
 	rand.Seed(time.Now().Unix())
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	log.Logger = log.With().Caller().Logger()
 	err := discordMainWrapper()
 	if err != nil {
-		log.Println("Program exited with the following error:")
-		log.Println(err)
-		return
+		log.Fatal().Err(err)
 	}
 }
 
@@ -65,24 +66,23 @@ func discordMainWrapper() error {
 			return err
 		}
 		mw := io.MultiWriter(os.Stdout, file)
-		log.SetOutput(mw)
+		log.Logger = zerolog.New(mw).With().Caller().Logger()
 	}
 
 	emojiGuildID := os.Getenv("EMOJI_GUILD_ID")
 
-	log.Println(version + "-" + commit)
+	log.Info().Str("version", version).Str("commit", commit)
 
 	if os.Getenv("WORKER_BOT_TOKENS") != "" {
-		log.Println("WORKER_BOT_TOKENS is now a variable used by Galactus, not AutoMuteUs!")
-		log.Fatal("Move WORKER_BOT_TOKENS to Galactus' config, then try again")
+		log.Fatal().Msg("WORKER_BOT_TOKENS is now a variable used by Galactus, not AutoMuteUs!")
 	}
 
 	numShardsStr := os.Getenv("NUM_SHARDS")
 	numShards, err := strconv.Atoi(numShardsStr)
 	if err != nil {
-		log.Println("No NUM_SHARDS specified; defaulting to 1")
 		numShards = 1
 	}
+	log.Info().Int("NUM_SHARDS", numShards)
 
 	shardIDStr := os.Getenv("SHARD_ID")
 	shardID, err := strconv.Atoi(shardIDStr)
@@ -90,9 +90,9 @@ func discordMainWrapper() error {
 		return errors.New("you specified a shardID higher than or equal to the total number of shards")
 	}
 	if err != nil {
-		log.Println("No SHARD_ID specified; defaulting to 0")
 		shardID = 0
 	}
+	log.Info().Int("SHARD_ID", shardID)
 
 	url := os.Getenv("HOST")
 	if url == "" {
@@ -112,7 +112,7 @@ func discordMainWrapper() error {
 			Password: redisPassword,
 		})
 		if err != nil {
-			log.Println(err)
+			log.Error().Err(err)
 		}
 		err = storageInterface.Init(storage.RedisParameters{
 			Addr:     redisAddr,
@@ -120,7 +120,7 @@ func discordMainWrapper() error {
 			Password: redisPassword,
 		})
 		if err != nil {
-			log.Println(err)
+			log.Error().Err(err)
 		}
 	} else {
 		return errors.New("no REDIS_ADDR specified; exiting")
@@ -133,7 +133,7 @@ func discordMainWrapper() error {
 
 	galactusClient, err := discord.NewGalactusClient(galactusAddr)
 	if err != nil {
-		log.Println("Error connecting to Galactus!")
+		log.Error().Err(err)
 		return err
 	}
 
@@ -164,19 +164,18 @@ func discordMainWrapper() error {
 		go func() {
 			err := psql.LoadAndExecFromFile("./storage/postgres.sql")
 			if err != nil {
-				log.Println("Exiting with fatal error when attempting to execute postgres.sql:")
-				log.Fatal(err)
+				log.Fatal().Err(err)
 			}
 		}()
 	}
 
-	log.Println("Bot is now running.  Press CTRL-C to exit.")
+	log.Info().Msg("Bot is now running.  Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
 	bot := discord.MakeAndStartBot(version, commit, discordToken, url, emojiGuildID, numShards, shardID, &redisClient, &storageInterface, &psql, galactusClient, logPath)
 	if bot == nil {
-		log.Fatal("bot failed to initialize; did you provide a valid Discord Bot Token?")
+		log.Fatal().Msg("Bot failed to initialize; did you provide a valid Discord Bot Token?")
 	}
 
 	// empty string entry = global
@@ -191,14 +190,14 @@ func discordMainWrapper() error {
 		for _, guild := range slashCommandGuildIds {
 			for _, v := range command.All {
 				if guild == "" {
-					log.Printf("Registering command %s GLOBALLY\n", v.Name)
+					log.Info().Str("command", v.Name).Str("guild", "GLOBAL").Msg("register command")
 				} else {
-					log.Printf("Registering command %s in guild %s\n", v.Name, guild)
+					log.Info().Str("command", v.Name).Str("guild", guild).Msg("register command")
 				}
 
 				id, err := bot.PrimarySession.ApplicationCommandCreate(bot.PrimarySession.State.User.ID, guild, v)
 				if err != nil {
-					log.Panicf("Cannot create command: %v", err)
+					log.Error().Err(err)
 				} else {
 					registeredCommands = append(registeredCommands, registeredCommand{
 						GuildID:            guild,
@@ -207,7 +206,7 @@ func discordMainWrapper() error {
 				}
 			}
 		}
-		log.Println("Finishing registering all commands!")
+		log.Info().Msg("Finishing registering all commands!")
 	}
 
 	<-sc
@@ -215,19 +214,19 @@ func discordMainWrapper() error {
 	time.Sleep(time.Second)
 
 	if !isOfficial {
-		log.Println("Deleting slash commands")
+		log.Info().Msg("Deleting slash commands")
 		for _, v := range registeredCommands {
 			if v.GuildID == "" {
-				log.Printf("Deleting command %s GLOBALLY\n", v.ApplicationCommand.Name)
+				log.Info().Str("command", v.ApplicationCommand.Name).Str("guild", "GLOBAL").Msg("delete command")
 			} else {
-				log.Printf("Deleting command %s on guild %s\n", v.ApplicationCommand.Name, v.GuildID)
+				log.Info().Str("command", v.ApplicationCommand.Name).Str("guild", v.GuildID).Msg("delete command")
 			}
 			err = bot.PrimarySession.ApplicationCommandDelete(v.ApplicationCommand.ApplicationID, v.GuildID, v.ApplicationCommand.ID)
 			if err != nil {
-				log.Println(err)
+				log.Error().Err(err)
 			}
 		}
-		log.Println("Finished deleting all commands")
+		log.Info().Msg("Finished deleting all commands")
 	}
 
 	bot.Close()
